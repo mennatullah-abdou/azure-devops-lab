@@ -1,0 +1,37 @@
+---
+- name: Deploy Apache Website on Azure
+  hosts: webservers
+  become: true
+
+  tasks:
+    - name: Install Apache
+      ansible.builtin.apt:
+        name: apache2
+        state: present
+        update_cache: true
+
+    - name: Copy website HTML
+      ansible.builtin.copy:
+        src: files/index.html
+        dest: /var/www/html/index.html
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start Apache
+      ansible.builtin.systemd_service:
+        name: apache2
+        state: started
+        enabled: true
+
+    - name: Verify website from Azure VM
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: true
+        status_code: 200
+      register: website
+
+    - name: Confirm deployment content
+      ansible.builtin.assert:
+        that:
+          - "'Deployed with Terraform' in website.content"

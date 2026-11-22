@@ -1,0 +1,12 @@
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+
+ansible/inventory.ini
+*.pem
+*.key
+id_ed25519
+id_rsa
