@@ -1,0 +1,174 @@
+
+name: Deploy Apache Website to Azure
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-devops-lab
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Terraform and Ansible Deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup Python for Ansible
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        run: |
+          python -m pip install ansible
+          ansible --version
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get GitHub Runner Public IP
+        run: |
+          RUNNER_IP=$(curl -fsS -4 https://api.ipify.org)
+          echo "TF_VAR_ssh_source_cidr=$RUNNER_IP/32" >> "$GITHUB_ENV"
+          echo "Runner public IP: $RUNNER_IP"
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
+            -backend-config="key=azure-devops-lab.tfstate"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Azure VM IP
+        run: |
+          VM_IP=$(terraform -chdir=terraform output -raw vm_public_ip)
+
+          echo "VM_IP=$VM_IP" >> "$GITHUB_ENV"
+          echo "Azure VM Public IP: $VM_IP"
+
+      - name: Configure SSH Private Key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Verify Azure VM SSH Host Key
+        run: |
+          HOST_INFO=$(az vm run-command invoke \
+            --resource-group rg-devops-lab \
+            --name vm-apache-lab \
+            --command-id RunShellScript \
+            --scripts "cat /etc/ssh/ssh_host_ed25519_key.pub" \
+            --query "value[0].message" \
+            -o tsv)
+
+          HOST_KEY=$(printf '%s\n' "$HOST_INFO" \
+            | grep '^ssh-ed25519 ' | head -n 1)
+
+          if [ -z "$HOST_KEY" ]; then
+            echo "Unable to retrieve SSH host key"
+            exit 1
+          fi
+
+          printf '%s %s\n' "$VM_IP" "$HOST_KEY" \
+            >> ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Generate Ansible Inventory
+        run: |
+          mkdir -p ansible
+
+          cat > ansible/inventory.ini <<EOF
+          [webservers]
+          vm1 ansible_host=$VM_IP ansible_user=azureuser ansible_ssh_private_key_file=$HOME/.ssh/id_ed25519
+          EOF
+
+          cat ansible/inventory.ini
+
+      - name: Wait for VM SSH
+        run: |
+          for attempt in $(seq 1 30); do
+            if ssh \
+              -o BatchMode=yes \
+              -o ConnectTimeout=5 \
+              azureuser@"$VM_IP" "echo SSH ready"; then
+              echo "SSH connection successful"
+              exit 0
+            fi
+
+            echo "Waiting for SSH ($attempt/30)"
+            sleep 5
+          done
+
+          echo "SSH connection failed"
+          exit 1
+
+      - name: Wait for Cloud Init
+        run: |
+          ssh azureuser@"$VM_IP" \
+            "sudo cloud-init status --wait"
+
+      - name: Deploy Apache Using Ansible
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/deploy.yml
+
+      - name: Verify Website
+        run: |
+          curl --fail \
+            --retry 12 \
+            --retry-delay 5 \
+            --retry-connrefused \
+            "http://$VM_IP/" \
+            | tee website-response.html
+
+          grep -q "Deployed with Terraform" website-response.html
+
+          echo "Website deployment verified successfully!"
