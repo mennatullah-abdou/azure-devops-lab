@@ -1,0 +1,26 @@
+
+name: Test GitHub Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository files
+        uses: actions/checkout@v4
+
+      - name: Show runner information
+        run: |
+          echo "Running on GitHub Ubuntu"
+          whoami
+          pwd
+          uname -a
+
+      - name: List project files
+        run: |
+          ls -la
+          ls terraform
+          ls ansible
