@@ -19,41 +19,57 @@ jobs:
     timeout-minutes: 45
 
     env:
-      # Azure authentication using OIDC
+      # Azure OIDC authentication
       ARM_USE_OIDC: "true"
       ARM_USE_AZUREAD: "true"
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Pass SSH public key directly to Terraform
+      # Terraform input variable
       TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
 
     steps:
-
-      # STEP 1 - Checkout source code
+      # STEP 1 - Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # STEP 2 - Install Terraform
+      # STEP 2 - Validate SSH public key
+      - name: Validate SSH Public Key
+        env:
+          SSH_PUBLIC_KEY: ${{ vars.SSH_PUBLIC_KEY }}
+        run: |
+          if [ -z "$SSH_PUBLIC_KEY" ]; then
+            echo "::error::SSH_PUBLIC_KEY is missing or empty"
+            exit 1
+          fi
+
+          if [[ ! "$SSH_PUBLIC_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-) ]]; then
+            echo "::error::SSH_PUBLIC_KEY has an invalid format"
+            exit 1
+          fi
+
+          echo "SSH public key is configured"
+
+      # STEP 3 - Setup Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
 
-      # STEP 3 - Setup Python
+      # STEP 4 - Setup Python
       - name: Setup Python for Ansible
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # STEP 4 - Install Ansible
+      # STEP 5 - Install Ansible
       - name: Install Ansible
         run: |
           python -m pip install ansible
           ansible --version
 
-      # STEP 5 - Login to Azure using OIDC
+      # STEP 6 - Login to Azure
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -61,20 +77,20 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # STEP 6 - Discover GitHub Runner Public IP
+      # STEP 7 - Get runner public IP
       - name: Get GitHub Runner Public IP
         run: |
           RUNNER_IP=$(curl -fsS -4 https://api.ipify.org)
 
           if [ -z "$RUNNER_IP" ]; then
-            echo "Failed to discover runner public IP"
+            echo "::error::Failed to discover runner public IP"
             exit 1
           fi
 
           echo "TF_VAR_ssh_source_cidr=$RUNNER_IP/32" >> "$GITHUB_ENV"
           echo "Runner public IP: $RUNNER_IP"
 
-      # STEP 7 - Initialize Terraform Remote State
+      # STEP 8 - Initialize Terraform
       - name: Terraform Init
         working-directory: terraform
         run: |
@@ -85,12 +101,12 @@ jobs:
             -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
             -backend-config="key=azure-devops-lab.tfstate"
 
-      # STEP 8 - Validate Terraform Files
+      # STEP 9 - Validate Terraform
       - name: Terraform Validate
         working-directory: terraform
         run: terraform validate
 
-      # STEP 9 - Terraform Plan
+      # STEP 10 - Terraform Plan
       - name: Terraform Plan
         working-directory: terraform
         run: |
@@ -98,7 +114,7 @@ jobs:
             -input=false \
             -out=tfplan
 
-      # STEP 10 - Terraform Apply
+      # STEP 11 - Terraform Apply
       - name: Terraform Apply
         working-directory: terraform
         run: |
@@ -107,7 +123,7 @@ jobs:
             -auto-approve \
             tfplan
 
-      # STEP 11 - Retrieve VM Information
+      # STEP 12 - Read Terraform outputs
       - name: Get Azure VM Details
         run: |
           VM_IP=$(terraform -chdir=terraform output -raw vm_public_ip)
@@ -115,7 +131,7 @@ jobs:
           VM_RG=$(terraform -chdir=terraform output -raw resource_group_name)
 
           if [ -z "$VM_IP" ] || [ -z "$VM_NAME" ] || [ -z "$VM_RG" ]; then
-            echo "Terraform VM outputs are missing"
+            echo "::error::Terraform VM outputs are missing"
             exit 1
           fi
 
@@ -127,7 +143,7 @@ jobs:
           echo "VM Name: $VM_NAME"
           echo "Resource Group: $VM_RG"
 
-      # STEP 12 - Configure SSH Private Key
+      # STEP 13 - Configure SSH private key
       - name: Configure SSH Private Key
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
@@ -135,7 +151,7 @@ jobs:
           set -e
 
           if [ -z "$SSH_PRIVATE_KEY" ]; then
-            echo "SSH_PRIVATE_KEY secret is missing"
+            echo "::error::SSH_PRIVATE_KEY secret is missing"
             exit 1
           fi
 
@@ -147,7 +163,7 @@ jobs:
 
           ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
 
-      # STEP 13 - Retrieve SSH Host Key Through Azure
+      # STEP 14 - Retrieve trusted SSH host key
       - name: Verify Azure VM SSH Host Key
         run: |
           set -euo pipefail
@@ -165,7 +181,7 @@ jobs:
             | head -n 1 || true)
 
           if [ -z "$HOST_KEY" ]; then
-            echo "Unable to retrieve Azure VM SSH host key"
+            echo "::error::Unable to retrieve Azure VM SSH host key"
             exit 1
           fi
 
@@ -174,9 +190,9 @@ jobs:
 
           chmod 600 "$HOME/.ssh/known_hosts"
 
-          echo "SSH host key registered"
+          echo "SSH host key registered successfully"
 
-      # STEP 14 - Generate Ansible Inventory
+      # STEP 15 - Generate Ansible inventory
       - name: Generate Ansible Inventory
         run: |
           mkdir -p ansible
@@ -186,10 +202,10 @@ jobs:
           vm1 ansible_host=$VM_IP ansible_user=azureuser ansible_ssh_private_key_file=$HOME/.ssh/id_ed25519
           EOF
 
-          echo "Generated Ansible inventory:"
+          echo "Generated inventory:"
           cat ansible/inventory.ini
 
-      # STEP 15 - Wait for VM SSH
+      # STEP 16 - Wait for SSH
       - name: Wait for VM SSH
         run: |
           for attempt in $(seq 1 30); do
@@ -208,10 +224,10 @@ jobs:
             sleep 5
           done
 
-          echo "SSH connection failed"
+          echo "::error::SSH connection failed"
           exit 1
 
-      # STEP 16 - Wait for Cloud Init
+      # STEP 17 - Wait for cloud-init
       - name: Wait for Cloud Init
         run: |
           ssh \
@@ -220,21 +236,21 @@ jobs:
             azureuser@"$VM_IP" \
             "sudo cloud-init status --wait"
 
-      # STEP 17 - Verify Ansible Connection
+      # STEP 18 - Test Ansible connection
       - name: Test Ansible Connectivity
         run: |
           ansible webservers \
             -i ansible/inventory.ini \
             -m ansible.builtin.ping
 
-      # STEP 18 - Deploy Apache
+      # STEP 19 - Deploy Apache
       - name: Deploy Apache Using Ansible
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
             ansible/deploy.yml
 
-      # STEP 19 - Verify Website
+      # STEP 20 - Verify website
       - name: Verify Website
         run: |
           set -euo pipefail

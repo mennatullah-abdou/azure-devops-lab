@@ -1,14 +1,9 @@
-variable "location" {
-  type    = string
-  default = "eastus"
-}
-
-variable "ssh_source_cidr" {
-  type        = string
-  description = "Public IP/CIDR allowed to connect over SSH"
-}
-
 variable "ssh_public_key" {
   type        = string
-  description = "SSH public key used to connect to Azure Ubuntu VM"
+  description = "SSH public key for Azure VM"
+
+  validation {
+    condition     = length(trimspace(var.ssh_public_key)) > 0
+    error_message = "ssh_public_key must not be empty."
+  }
 }
