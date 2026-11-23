@@ -8,7 +8,7 @@ variable "ssh_source_cidr" {
   description = "Public IP/CIDR allowed to connect over SSH"
 }
 
-variable "ssh_public_key_path" {
-  type    = string
-  default = "~/.ssh/azure_devops_lab.pub"
+variable "ssh_public_key" {
+  type        = string
+  description = "SSH public key used to connect to Azure Ubuntu VM"
 }
