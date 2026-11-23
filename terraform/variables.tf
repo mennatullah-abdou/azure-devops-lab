@@ -7,3 +7,10 @@ variable "ssh_public_key" {
     error_message = "ssh_public_key must not be empty."
   }
 }
+
+
+variable "location" {
+  description = "Azure region for deploying resources"
+  type        = string
+  default     = "eastus"
+}
