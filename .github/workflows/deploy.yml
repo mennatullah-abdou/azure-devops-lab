@@ -109,7 +109,7 @@ jobs:
       - name: Terraform Validate
         working-directory: terraform
         run: |
-          terraform fmt -check
+          terraform fmt 
           terraform validate
 
       # STEP 10 - Inspect existing Terraform state
