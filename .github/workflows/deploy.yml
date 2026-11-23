@@ -19,15 +19,15 @@ jobs:
     timeout-minutes: 45
 
     env:
-      # Azure OIDC authentication
+      # Azure authentication using OIDC
       ARM_USE_OIDC: "true"
       ARM_USE_AZUREAD: "true"
       ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Terraform input variable
-      TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+      # SSH public key is stored in GitHub Secrets
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
 
     steps:
       # STEP 1 - Checkout repository
@@ -37,15 +37,17 @@ jobs:
       # STEP 2 - Validate SSH public key
       - name: Validate SSH Public Key
         env:
-          SSH_PUBLIC_KEY: ${{ vars.SSH_PUBLIC_KEY }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
+          set -euo pipefail
+
           if [ -z "$SSH_PUBLIC_KEY" ]; then
             echo "::error::SSH_PUBLIC_KEY is missing or empty"
             exit 1
           fi
 
           if [[ ! "$SSH_PUBLIC_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-) ]]; then
-            echo "::error::SSH_PUBLIC_KEY has an invalid format"
+            echo "::error::Invalid SSH public key format"
             exit 1
           fi
 
@@ -80,6 +82,8 @@ jobs:
       # STEP 7 - Get runner public IP
       - name: Get GitHub Runner Public IP
         run: |
+          set -euo pipefail
+
           RUNNER_IP=$(curl -fsS -4 https://api.ipify.org)
 
           if [ -z "$RUNNER_IP" ]; then
@@ -90,7 +94,7 @@ jobs:
           echo "TF_VAR_ssh_source_cidr=$RUNNER_IP/32" >> "$GITHUB_ENV"
           echo "Runner public IP: $RUNNER_IP"
 
-      # STEP 8 - Initialize Terraform
+      # STEP 8 - Initialize Terraform remote state
       - name: Terraform Init
         working-directory: terraform
         run: |
@@ -104,9 +108,66 @@ jobs:
       # STEP 9 - Validate Terraform
       - name: Terraform Validate
         working-directory: terraform
-        run: terraform validate
+        run: |
+          terraform fmt -check
+          terraform validate
 
-      # STEP 10 - Terraform Plan
+      # STEP 10 - Inspect existing Terraform state
+      - name: Inspect Terraform State
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+
+          echo "Resources currently tracked by Terraform:"
+          terraform state list
+
+      # STEP 11 - Import existing resource group if needed
+      - name: Import Existing Resource Group
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+
+          RG_NAME="rg-ansible-github-lab"
+          RG_ADDRESS="azurerm_resource_group.rg"
+
+          SUBSCRIPTION_ID=$(az account show \
+            --query id \
+            --output tsv)
+
+          RG_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME"
+
+          echo "Checking Terraform state..."
+
+          if terraform state list | grep -Fxq "$RG_ADDRESS"; then
+            echo "Resource group already exists in Terraform state"
+            echo "Import is not required"
+
+          elif [ "$(az group exists --name "$RG_NAME")" = "true" ]; then
+            echo "Resource group exists in Azure but is missing from state"
+            echo "Importing existing resource group..."
+
+            terraform import \
+              -input=false \
+              "$RG_ADDRESS" \
+              "$RG_ID"
+
+            echo "Resource group import completed"
+
+          else
+            echo "Resource group does not exist in Azure"
+            echo "Terraform will create it during Apply"
+          fi
+
+      # STEP 12 - Verify Terraform state after import
+      - name: Verify Terraform State
+        working-directory: terraform
+        run: |
+          set -euo pipefail
+
+          echo "Current Terraform-managed resources:"
+          terraform state list
+
+      # STEP 13 - Terraform Plan
       - name: Terraform Plan
         working-directory: terraform
         run: |
@@ -114,7 +175,7 @@ jobs:
             -input=false \
             -out=tfplan
 
-      # STEP 11 - Terraform Apply
+      # STEP 14 - Terraform Apply
       - name: Terraform Apply
         working-directory: terraform
         run: |
@@ -123,9 +184,11 @@ jobs:
             -auto-approve \
             tfplan
 
-      # STEP 12 - Read Terraform outputs
+      # STEP 15 - Retrieve Azure VM information
       - name: Get Azure VM Details
         run: |
+          set -euo pipefail
+
           VM_IP=$(terraform -chdir=terraform output -raw vm_public_ip)
           VM_NAME=$(terraform -chdir=terraform output -raw vm_name)
           VM_RG=$(terraform -chdir=terraform output -raw resource_group_name)
@@ -143,27 +206,33 @@ jobs:
           echo "VM Name: $VM_NAME"
           echo "Resource Group: $VM_RG"
 
-      # STEP 13 - Configure SSH private key
+      # STEP 16 - Configure SSH private key
       - name: Configure SSH Private Key
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          set -e
+          set -euo pipefail
 
           if [ -z "$SSH_PRIVATE_KEY" ]; then
-            echo "::error::SSH_PRIVATE_KEY secret is missing"
+            echo "::error::SSH_PRIVATE_KEY is missing"
             exit 1
           fi
 
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_PRIVATE_KEY" \
+            > "$HOME/.ssh/id_ed25519"
+
           chmod 600 "$HOME/.ssh/id_ed25519"
 
-          ssh-keygen -y -f "$HOME/.ssh/id_ed25519" > /dev/null
+          ssh-keygen -y \
+            -f "$HOME/.ssh/id_ed25519" \
+            > /dev/null
 
-      # STEP 14 - Retrieve trusted SSH host key
+          echo "SSH private key configured"
+
+      # STEP 17 - Retrieve SSH host key through Azure
       - name: Verify Azure VM SSH Host Key
         run: |
           set -euo pipefail
@@ -181,7 +250,7 @@ jobs:
             | head -n 1 || true)
 
           if [ -z "$HOST_KEY" ]; then
-            echo "::error::Unable to retrieve Azure VM SSH host key"
+            echo "::error::Unable to retrieve SSH host key"
             exit 1
           fi
 
@@ -190,11 +259,13 @@ jobs:
 
           chmod 600 "$HOME/.ssh/known_hosts"
 
-          echo "SSH host key registered successfully"
+          echo "SSH host key registered"
 
-      # STEP 15 - Generate Ansible inventory
+      # STEP 18 - Generate Ansible inventory
       - name: Generate Ansible Inventory
         run: |
+          set -euo pipefail
+
           mkdir -p ansible
 
           cat > ansible/inventory.ini <<EOF
@@ -202,12 +273,14 @@ jobs:
           vm1 ansible_host=$VM_IP ansible_user=azureuser ansible_ssh_private_key_file=$HOME/.ssh/id_ed25519
           EOF
 
-          echo "Generated inventory:"
+          echo "Generated Ansible inventory:"
           cat ansible/inventory.ini
 
-      # STEP 16 - Wait for SSH
+      # STEP 19 - Wait for SSH connectivity
       - name: Wait for VM SSH
         run: |
+          set -euo pipefail
+
           for attempt in $(seq 1 30); do
             if ssh \
               -i "$HOME/.ssh/id_ed25519" \
@@ -227,7 +300,7 @@ jobs:
           echo "::error::SSH connection failed"
           exit 1
 
-      # STEP 17 - Wait for cloud-init
+      # STEP 20 - Wait for cloud-init
       - name: Wait for Cloud Init
         run: |
           ssh \
@@ -236,21 +309,21 @@ jobs:
             azureuser@"$VM_IP" \
             "sudo cloud-init status --wait"
 
-      # STEP 18 - Test Ansible connection
+      # STEP 21 - Test Ansible connectivity
       - name: Test Ansible Connectivity
         run: |
           ansible webservers \
             -i ansible/inventory.ini \
             -m ansible.builtin.ping
 
-      # STEP 19 - Deploy Apache
+      # STEP 22 - Deploy Apache using Ansible
       - name: Deploy Apache Using Ansible
         run: |
           ansible-playbook \
             -i ansible/inventory.ini \
             ansible/deploy.yml
 
-      # STEP 20 - Verify website
+      # STEP 23 - Verify deployed website
       - name: Verify Website
         run: |
           set -euo pipefail
