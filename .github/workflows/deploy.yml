@@ -112,16 +112,32 @@ jobs:
           terraform fmt 
           terraform validate
 
-      # STEP 10 - Inspect existing Terraform state
+            # STEP 10 - Inspect Terraform State
       - name: Inspect Terraform State
         working-directory: terraform
         run: |
           set -euo pipefail
 
-          echo "Resources currently tracked by Terraform:"
-          terraform state list
+          echo "Checking whether remote state exists..."
+
+          STATE_EXISTS=$(az storage blob exists \
+            --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            --container-name "${{ vars.TFSTATE_CONTAINER }}" \
+            --name "azure-devops-lab.tfstate" \
+            --auth-mode login \
+            --query exists \
+            -o tsv)
+
+          if [ "$STATE_EXISTS" = "true" ]; then
+            echo "Terraform state exists."
+            terraform state list
+          else
+            echo "No state exists yet."
+            echo "This may be the first deployment."
+          fi
 
       # STEP 11 - Import existing resource group if needed
+            # STEP 11 - Import Existing Resource Group
       - name: Import Existing Resource Group
         working-directory: terraform
         run: |
@@ -131,19 +147,28 @@ jobs:
           RG_ADDRESS="azurerm_resource_group.rg"
 
           SUBSCRIPTION_ID=$(az account show \
-            --query id \
-            --output tsv)
+            --query id -o tsv)
 
           RG_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME"
 
-          echo "Checking Terraform state..."
+          STATE_EXISTS=$(az storage blob exists \
+            --account-name "${{ vars.TFSTATE_STORAGE_ACCOUNT }}" \
+            --container-name "${{ vars.TFSTATE_CONTAINER }}" \
+            --name "azure-devops-lab.tfstate" \
+            --auth-mode login \
+            --query exists \
+            -o tsv)
 
-          if terraform state list | grep -Fxq "$RG_ADDRESS"; then
-            echo "Resource group already exists in Terraform state"
-            echo "Import is not required"
+          if [ "$STATE_EXISTS" = "true" ]; then
+            CURRENT_STATE=$(terraform state list)
+          else
+            CURRENT_STATE=""
+          fi
+
+          if printf '%s\n' "$CURRENT_STATE" | grep -Fxq "$RG_ADDRESS"; then
+            echo "Resource group already tracked."
 
           elif [ "$(az group exists --name "$RG_NAME")" = "true" ]; then
-            echo "Resource group exists in Azure but is missing from state"
             echo "Importing existing resource group..."
 
             terraform import \
@@ -151,22 +176,17 @@ jobs:
               "$RG_ADDRESS" \
               "$RG_ID"
 
-            echo "Resource group import completed"
-
           else
-            echo "Resource group does not exist in Azure"
-            echo "Terraform will create it during Apply"
+            echo "Resource group does not exist."
+            echo "Terraform will create it."
           fi
-
       # STEP 12 - Verify Terraform state after import
+           # STEP 12 - Verify Terraform State
       - name: Verify Terraform State
         working-directory: terraform
         run: |
-          set -euo pipefail
-
-          echo "Current Terraform-managed resources:"
+          echo "Terraform-managed resources:"
           terraform state list
-
       # STEP 13 - Terraform Plan
       - name: Terraform Plan
         working-directory: terraform
